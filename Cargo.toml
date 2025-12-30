@@ -1,0 +1,43 @@
+[package]
+name = "dood-cli"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Your encryption library
+DooD_encryption_lib = { path = "../DooD-encryption-lib" }
+
+# CLI & TUI
+clap = { version = "4.5", features = ["derive"] }
+dialoguer = "0.11"
+colored = "2.1"
+
+# Async runtime
+tokio = { version = "1.35", features = ["full"] }
+
+# HTTP client
+reqwest = { version = "0.11", features = ["json"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Encoding
+base64 = "0.21"
+
+# Database for local storage
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+# Crypto utilities
+rand = "0.8"
+x25519-dalek = "2.0"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Time utilities
+chrono = "0.4"
+
+# System directories
+dirs = "5.0"
