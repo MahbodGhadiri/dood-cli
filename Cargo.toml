@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-# Your encryption library
+# DooD encryption library
 DooD_encryption_lib = { path = "../DooD-encryption-lib" }
 
 # CLI & TUI

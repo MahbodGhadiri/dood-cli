@@ -411,7 +411,6 @@ fn save_ratchet_state(username: &str, state: &DoubleRatchet) -> Result<()> {
     let state_json = state.export();
     let state_str = serde_json::to_string(&state_json)?;
 
-    // Use composite key: current_user:conversation_partner
     let key = format!("{}:{}", current_user, username);
 
     conn.execute(

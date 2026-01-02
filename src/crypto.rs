@@ -4,20 +4,18 @@ use dood_encryption::x3dh::X3DH;
 use std::fs;
 use std::path::Path;
 
-use crate::{auth, database};
+use crate::{auth, config, database};
 
 pub fn export_keys(output_path: &str) -> Result<()> {
     let username = auth::get_current_username()?;
     let conn = database::get_connection()?;
 
-    // Get key bundle
     let key_bundle: String = conn.query_row(
         "SELECT key_bundle FROM account WHERE username = ?1",
         rusqlite::params![username],
         |row| row.get(0),
     )?;
 
-    // Create export data
     let export_data = serde_json::json!({
         "username": username,
         "key_bundle": key_bundle,
@@ -25,7 +23,6 @@ pub fn export_keys(output_path: &str) -> Result<()> {
         "exported_at": chrono::Utc::now().to_rfc3339(),
     });
 
-    // Write to file
     let json_str = serde_json::to_string_pretty(&export_data)?;
     fs::write(output_path, json_str)?;
 
@@ -47,7 +44,6 @@ pub fn import_keys(input_path: &str) -> Result<()> {
         anyhow::bail!("File not found: {}", input_path);
     }
 
-    // Read file
     let json_str = fs::read_to_string(input_path)?;
     let import_data: serde_json::Value = serde_json::from_str(&json_str)?;
 
@@ -58,7 +54,6 @@ pub fn import_keys(input_path: &str) -> Result<()> {
         .as_str()
         .context("Invalid export file: missing key_bundle")?;
 
-    // Check if account already exists
     let conn = database::get_connection()?;
     let exists: bool = conn.query_row(
         "SELECT COUNT(*) FROM account WHERE username = ?1",
@@ -73,11 +68,11 @@ pub fn import_keys(input_path: &str) -> Result<()> {
         );
     }
 
-    // Parse and validate the key bundle
     let key_bundle_json: serde_json::Value = serde_json::from_str(key_bundle_str)?;
     let x3dh = X3DH::from_private(key_bundle_json);
 
-    // Save to database
+    let server_url = config::get_server_url()?;
+
     let now = chrono::Utc::now().to_rfc3339();
     let identity_pub = auth::get_identity_public_key(&x3dh);
     let identity_pub_bytes = identity_pub.to_bytes();
@@ -95,7 +90,7 @@ pub fn import_keys(input_path: &str) -> Result<()> {
             &[] as &[u8],
             &[] as &[u8],
             key_bundle_str,
-            "http://localhost:8080", // Default server
+            server_url,
             now,
         ],
     )?;

@@ -19,7 +19,6 @@ pub fn get_connection() -> Result<Connection> {
 pub fn init() -> Result<()> {
     let conn = get_connection()?;
 
-    // Account table
     conn.execute(
         "CREATE TABLE IF NOT EXISTS account (
             id INTEGER PRIMARY KEY,
@@ -38,7 +37,6 @@ pub fn init() -> Result<()> {
         [],
     )?;
 
-    // Messages table
     conn.execute(
         "CREATE TABLE IF NOT EXISTS messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -54,7 +52,6 @@ pub fn init() -> Result<()> {
         [],
     )?;
 
-    // Ratchet states table (for ongoing conversations) - Changed to TEXT
     conn.execute(
         "CREATE TABLE IF NOT EXISTS ratchet_states (
             id INTEGER PRIMARY KEY,
@@ -65,7 +62,6 @@ pub fn init() -> Result<()> {
         [],
     )?;
 
-    // Session table (current logged in user)
     conn.execute(
         "CREATE TABLE IF NOT EXISTS session (
             id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -75,7 +71,6 @@ pub fn init() -> Result<()> {
         [],
     )?;
 
-    // Contacts/Key bundles cache
     conn.execute(
         "CREATE TABLE IF NOT EXISTS contacts (
             id INTEGER PRIMARY KEY,

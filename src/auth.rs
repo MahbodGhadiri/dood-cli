@@ -6,25 +6,20 @@ use rusqlite::params;
 use serde_json::json;
 use x25519_dalek::PublicKey;
 
+use crate::config;
 use crate::database;
 
-pub async fn register(username: &str, server_url: Option<&str>) -> Result<()> {
-    let server = server_url.unwrap_or("http://localhost:8080");
+pub async fn register(username: &str) -> Result<()> {
+    let server = config::get_server_url()?;
 
     println!("{}", "🔐 Generating cryptographic keys...".cyan());
 
-    // Create new X3DH instance
     let x3dh = X3DH::new();
-
-    // Export PUBLIC key bundle for server
     let public_key_bundle = x3dh.export();
-
-    // Export PRIVATE keys for local storage
     let private_key_bundle = x3dh.export_private();
 
     println!("{}", "📡 Registering with server...".cyan());
 
-    // Register with server (send PUBLIC keys only)
     let client = reqwest::Client::new();
     let payload = json!({
         "bundle": public_key_bundle,
@@ -43,10 +38,7 @@ pub async fn register(username: &str, server_url: Option<&str>) -> Result<()> {
         anyhow::bail!("Registration failed: {}", error_text);
     }
 
-    // Save account to database (store PRIVATE keys)
-    save_account(username, &x3dh, private_key_bundle.to_string(), server)?;
-
-    // Set as current session
+    save_account(username, &x3dh, private_key_bundle.to_string(), &server)?;
     set_session(username)?;
 
     println!(
@@ -62,7 +54,6 @@ pub async fn register(username: &str, server_url: Option<&str>) -> Result<()> {
 pub fn login(username: &str) -> Result<()> {
     let conn = database::get_connection()?;
 
-    // Check if account exists
     let exists: bool = conn.query_row(
         "SELECT COUNT(*) FROM account WHERE username = ?1",
         params![username],
@@ -73,7 +64,6 @@ pub fn login(username: &str) -> Result<()> {
         anyhow::bail!("Account '{}' not found. Please register first.", username);
     }
 
-    // Set session
     set_session(username)?;
 
     println!("{} Logged in as '{}'", "✓".green().bold(), username.bold());
@@ -119,7 +109,6 @@ pub fn load_x3dh(username: &str) -> Result<X3DH> {
         |row| row.get(0),
     )?;
 
-    // Parse JSON and reconstruct X3DH from PRIVATE keys
     let key_bundle: serde_json::Value = serde_json::from_str(&key_bundle_str)?;
     let x3dh = X3DH::from_private(key_bundle);
 
@@ -127,7 +116,6 @@ pub fn load_x3dh(username: &str) -> Result<X3DH> {
 }
 
 pub fn get_identity_public_key(x3dh: &X3DH) -> PublicKey {
-    // Get the public key from the PUBLIC export (for server communication)
     let bundle = x3dh.export();
     let identity_key_b64 = bundle["identity_key"].as_str().unwrap();
     let identity_key_bytes = BASE64_STANDARD.decode(identity_key_b64).unwrap();
@@ -154,12 +142,12 @@ fn save_account(
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             username,
-            &[] as &[u8], // We store everything in key_bundle
+            &[] as &[u8],
             &identity_pub_bytes[..],
             &[] as &[u8],
             &[] as &[u8],
             &[] as &[u8],
-            private_key_bundle, // Store PRIVATE keys
+            private_key_bundle,
             server_url,
             now,
         ],
@@ -172,16 +160,13 @@ fn set_session(username: &str) -> Result<()> {
     let conn = database::get_connection()?;
     let now = chrono::Utc::now().to_rfc3339();
 
-    // Clear existing session
     conn.execute("DELETE FROM session WHERE id = 1", [])?;
 
-    // Create new session
     conn.execute(
         "INSERT INTO session (id, username, logged_in_at) VALUES (1, ?1, ?2)",
         params![username, now],
     )?;
 
-    // Update last login
     conn.execute(
         "UPDATE account SET last_login = ?1 WHERE username = ?2",
         params![now, username],
