@@ -75,7 +75,7 @@ pub fn import_keys(input_path: &str) -> Result<()> {
 
     // Parse and validate the key bundle
     let key_bundle_json: serde_json::Value = serde_json::from_str(key_bundle_str)?;
-    let x3dh = X3DH::from(key_bundle_json);
+    let x3dh = X3DH::from_private(key_bundle_json);
 
     // Save to database
     let now = chrono::Utc::now().to_rfc3339();

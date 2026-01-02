@@ -1,10 +1,7 @@
 use anyhow::{Context, Result};
 use base64::{prelude::BASE64_STANDARD, Engine};
 use colored::*;
-use dood_encryption::{
-    double_ratchet::DoubleRatchet,
-    x3dh::{X3DHKeyBundle, X3DH},
-};
+use dood_encryption::{double_ratchet::DoubleRatchet, x3dh::X3DHKeyBundle};
 use reqwest;
 use serde_json::json;
 use x25519_dalek::PublicKey;
@@ -18,40 +15,76 @@ pub async fn send_message(recipient_username: &str, message: &str) -> Result<()>
     let sender_username = auth::get_current_username()?;
     let server_url = auth::get_server_url()?;
 
-    // Search for recipient to get their user_id and device_id
     let (recipient_user_id, recipient_device_id) = search_user(recipient_username).await?;
 
-    // Get or create ratchet state for this conversation
-    let mut ratchet_state = get_or_create_ratchet(&mut sender_x3dh, recipient_user_id).await?;
+    let is_first_message = load_ratchet_state(recipient_username).is_err();
 
-    // Encrypt the message
+    let (mut ratchet_state, x3dh_metadata) = if is_first_message {
+        println!("{}", "🔑 Initiating new encrypted session...".cyan());
+
+        let recipient_bundle_json = server::fetch_key_bundle_by_id(recipient_user_id).await?;
+        let recipient_bundle = parse_key_bundle(&recipient_bundle_json)?;
+
+        let x3dh_result = sender_x3dh.initiate_key_agreement(recipient_bundle);
+
+        let metadata = json!({
+            "sender_identity": BASE64_STANDARD.encode(x3dh_result.alice_identity_pub.as_bytes()),
+            "one_time_pre_key": x3dh_result.bob_one_time_pre_key.map(|k| BASE64_STANDARD.encode(k.as_bytes()))
+        });
+
+        let ratchet = DoubleRatchet::new_sender(
+            x3dh_result.rk,
+            x3dh_result.alice_dhs,
+            x3dh_result.bob_public_key,
+        );
+
+        (ratchet, Some(metadata))
+    } else {
+        (load_ratchet_state(recipient_username)?, None)
+    };
+
     let encrypt_result = ratchet_state.ratchet_encrypt(message.as_bytes());
 
-    // Save ratchet state (using username for local storage)
     save_ratchet_state(recipient_username, &ratchet_state)?;
 
-    // Encode for transmission
+    let header_with_x3dh = if let Some(metadata) = x3dh_metadata {
+        let header_json: serde_json::Value = serde_json::from_slice(&encrypt_result.header[32..])
+            .context("Failed to parse header JSON")?;
+
+        let mut modified_header = header_json.as_object().unwrap().clone();
+        modified_header.insert("x3dh_init".to_string(), metadata);
+
+        let header_bytes = serde_json::to_vec(&modified_header)?;
+
+        let mut full_header = Vec::new();
+        full_header.extend_from_slice(&encrypt_result.header[0..32]);
+        full_header.extend_from_slice(&header_bytes);
+
+        full_header
+    } else {
+        encrypt_result.header.clone()
+    };
+
     let ciphertext_b64 = BASE64_STANDARD.encode(&encrypt_result.cipher_text);
-    let header_b64 = BASE64_STANDARD.encode(&encrypt_result.header);
+    let header_b64 = BASE64_STANDARD.encode(&header_with_x3dh);
 
     println!("{}", "📡 Sending to server...".cyan());
 
-    // Send to server
-    let client = reqwest::Client::new();
-    let body = json!({
-        "messages": [{
-            "recipient_device_id": recipient_device_id,
-            "ciphertext": ciphertext_b64,
-            "header": header_b64
-        }]
+    let message_obj = json!({
+        "recipient_device_id": recipient_device_id,
+        "ciphertext": ciphertext_b64,
+        "header": header_b64
     });
 
-    // Generate challenge for authentication
+    let body = json!({
+        "messages": [message_obj]
+    });
+
     let challenge = sender_x3dh.generate_challenge();
     let token = BASE64_STANDARD.encode(&challenge);
     let identity_pub = auth::get_identity_public_key(&sender_x3dh);
 
-    let response = client
+    let response = reqwest::Client::new()
         .post(format!("{}/message/send", server_url))
         .json(&body)
         .bearer_auth(&token)
@@ -65,7 +98,6 @@ pub async fn send_message(recipient_username: &str, message: &str) -> Result<()>
         anyhow::bail!("Failed to send message: {}", error_text);
     }
 
-    // Save to local database
     database::save_message(
         recipient_username,
         &sender_username,
@@ -108,7 +140,6 @@ async fn search_user(username: &str) -> Result<(u64, u64)> {
         anyhow::bail!("User '{}' not found", username);
     }
 
-    // Find exact match
     let user = users
         .iter()
         .find(|u| u["username"].as_str() == Some(username))
@@ -121,10 +152,8 @@ async fn search_user(username: &str) -> Result<(u64, u64)> {
         anyhow::bail!("User '{}' has no devices", username);
     }
 
-    // Get first device (TODO: support multiple devices)
     let device_id = devices[0]["id"].as_u64().context("Missing device id")?;
 
-    // Store device_id for this user
     store_user_device_mapping(username, user_id, device_id)?;
 
     Ok((user_id, device_id))
@@ -154,18 +183,6 @@ fn store_user_device_mapping(username: &str, user_id: u64, device_id: u64) -> Re
     Ok(())
 }
 
-fn get_stored_device_id(username: &str) -> Result<u64> {
-    let conn = database::get_connection()?;
-
-    let device_id: u64 = conn.query_row(
-        "SELECT device_id FROM user_devices WHERE username = ?1",
-        rusqlite::params![username],
-        |row| row.get(0),
-    )?;
-
-    Ok(device_id)
-}
-
 pub async fn fetch_messages() -> Result<()> {
     println!("{}", "📥 Fetching messages...".cyan());
 
@@ -175,7 +192,6 @@ pub async fn fetch_messages() -> Result<()> {
 
     let client = reqwest::Client::new();
 
-    // Generate challenge for authentication
     let challenge = sender_x3dh.generate_challenge();
     let token = BASE64_STANDARD.encode(&challenge);
     let identity_pub = auth::get_identity_public_key(&sender_x3dh);
@@ -195,97 +211,153 @@ pub async fn fetch_messages() -> Result<()> {
 
     let messages: serde_json::Value = response.json().await?;
 
-    // Parse and decrypt messages
     if let Some(messages_array) = messages.as_array() {
         if messages_array.is_empty() {
             println!("{}", "No new messages.".yellow());
             return Ok(());
         }
 
-        println!("{} {} new message(s)", "✓".green(), messages_array.len());
+        let mut new_count = 0;
 
         for msg in messages_array {
-            if let Err(e) = process_received_message(&current_username, msg).await {
-                eprintln!("{} Failed to process message: {}", "✗".red(), e);
+            match process_received_message(&current_username, msg).await {
+                Ok(processed) => {
+                    if processed {
+                        new_count += 1;
+                    }
+                }
+                Err(e) => {
+                    eprintln!("{} Failed to process message: {}", "✗".red(), e);
+                }
             }
+        }
+
+        if new_count == 0 {
+            println!("{}", "No new messages.".yellow());
+        } else {
+            println!("{} {} new message(s)", "✓".green(), new_count);
         }
     }
 
     Ok(())
 }
 
-async fn process_received_message(current_username: &str, msg: &serde_json::Value) -> Result<()> {
-    // Extract message data
+async fn process_received_message(current_username: &str, msg: &serde_json::Value) -> Result<bool> {
     let ciphertext_b64 = msg["ciphertext"].as_str().context("Missing ciphertext")?;
     let header_b64 = msg["header"].as_str().context("Missing header")?;
-    let sender = msg["sender"].as_str().unwrap_or("unknown");
+    let sender = msg["username"].as_str().unwrap_or("unknown");
 
     let ciphertext = BASE64_STANDARD.decode(ciphertext_b64)?;
     let full_header = BASE64_STANDARD.decode(header_b64)?;
 
-    // Split header (first 32 bytes are associated data)
     let associated_data = &full_header[0..32];
     let header = &full_header[32..];
 
-    // Get or load ratchet state
-    let mut ratchet_state = load_ratchet_state(sender)?;
+    let header_json: serde_json::Value =
+        serde_json::from_slice(header).context("Failed to parse header JSON")?;
 
-    // Decrypt message
+    let parsed_header = DoubleRatchet::read_header(header);
+    let alice_dh_public = PublicKey::from(parsed_header.public_key);
+
+    if let Ok(ratchet_state) = load_ratchet_state(sender) {
+        if is_old_message(&ratchet_state, &parsed_header, &alice_dh_public) {
+            return Ok(false);
+        }
+    }
+
+    let mut ratchet_state =
+        get_or_initialize_receiver_ratchet(sender, &header_json, alice_dh_public).await?;
+
     let decrypted = ratchet_state.ratchet_decrypt(header, &ciphertext, associated_data);
 
-    // Save updated ratchet state
     save_ratchet_state(sender, &ratchet_state)?;
 
-    // Save message to database
     database::save_message(sender, sender, current_username, &decrypted, false)?;
 
     println!("\n{} {} {}", "📨".bold(), "From".cyan(), sender.bold());
     println!("  {}", decrypted);
 
-    Ok(())
+    Ok(true)
 }
 
-async fn get_or_create_ratchet(
-    sender_x3dh: &mut X3DH,
-    recipient_user_id: u64,
+fn is_old_message(
+    ratchet_state: &DoubleRatchet,
+    header: &dood_encryption::double_ratchet::ParsedHeader,
+    header_dh_public: &PublicKey,
+) -> bool {
+    if ratchet_state.dh_public_r.to_bytes() == header_dh_public.to_bytes() {
+        if header.n < ratchet_state.nr {
+            return true;
+        }
+    }
+
+    for skipped in &ratchet_state.mk_skipped {
+        if skipped.public_key == header.public_key && skipped.n == header.n {
+            return true;
+        }
+    }
+
+    false
+}
+
+async fn get_or_initialize_receiver_ratchet(
+    sender: &str,
+    header_json: &serde_json::Value,
+    alice_dh_public: PublicKey,
 ) -> Result<DoubleRatchet> {
-    // Try to load existing ratchet state (using user_id as key)
-    let recipient_key = format!("user_{}", recipient_user_id);
-    if let Ok(state) = load_ratchet_state(&recipient_key) {
+    if let Ok(state) = load_ratchet_state(sender) {
         return Ok(state);
     }
 
-    // Need to initiate new session
-    println!("{}", "🔑 Initiating new encrypted session...".cyan());
-
-    // Fetch recipient's key bundle from server using user_id
-    let recipient_bundle_json = server::fetch_key_bundle_by_id(recipient_user_id).await?;
-
-    // Parse the key bundle
-    let recipient_bundle = parse_key_bundle(&recipient_bundle_json)?;
-
-    // Perform X3DH key agreement
-    let x3dh_result = sender_x3dh.initiate_key_agreement(recipient_bundle);
-
-    // Create new ratchet
-    let ratchet = DoubleRatchet::new_sender(
-        x3dh_result.rk,
-        x3dh_result.alice_dhs,
-        x3dh_result.bob_public_key,
+    println!(
+        "{}",
+        "🔑 Initializing new encrypted session as receiver...".cyan()
     );
+
+    let mut receiver_x3dh = auth::get_current_x3dh()?;
+
+    let x3dh_init = header_json["x3dh_init"]
+        .as_object()
+        .context("Missing x3dh_init in first message header")?;
+
+    let sender_identity_b64 = x3dh_init["sender_identity"]
+        .as_str()
+        .context("Missing sender_identity")?;
+
+    let sender_identity_bytes = BASE64_STANDARD.decode(sender_identity_b64)?;
+    let alice_identity: [u8; 32] = sender_identity_bytes
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("Invalid sender identity length"))?;
+    let alice_identity_pub = PublicKey::from(alice_identity);
+
+    let one_time_pre_key = x3dh_init["one_time_pre_key"]
+        .as_str()
+        .and_then(|s| BASE64_STANDARD.decode(s).ok())
+        .and_then(|bytes| {
+            let arr: [u8; 32] = bytes.try_into().ok()?;
+            Some(PublicKey::from(arr))
+        });
+
+    let shared_key = receiver_x3dh.respond_to_key_agreement(
+        alice_identity_pub,
+        alice_dh_public,
+        one_time_pre_key,
+    );
+
+    let bob_dh_keypair = receiver_x3dh.get_pre_key_pair();
+
+    let ratchet = DoubleRatchet::new_receiver(shared_key, bob_dh_keypair, alice_dh_public);
 
     Ok(ratchet)
 }
 
 fn parse_key_bundle(response: &serde_json::Value) -> Result<X3DHKeyBundle> {
-    // Server returns an array of devices: [{"device_id": 11, "key_bundle": {...}}]
     let devices = response.as_array().context("Expected array of devices")?;
 
     if devices.is_empty() {
         anyhow::bail!("No devices found for user");
     }
 
-    // Get the first device (TODO: support multiple devices)
     let first_device = &devices[0];
     let bundle_json = &first_device["key_bundle"];
 
@@ -315,7 +387,6 @@ fn parse_key_bundle(response: &serde_json::Value) -> Result<X3DHKeyBundle> {
         .try_into()
         .map_err(|_| anyhow::anyhow!("Invalid signature length"))?;
 
-    // Handle optional one-time pre-key
     let one_time_pre_key = bundle_json["one_time_pre_key"]
         .as_str()
         .and_then(|s| BASE64_STANDARD.decode(s).ok())
@@ -334,16 +405,19 @@ fn parse_key_bundle(response: &serde_json::Value) -> Result<X3DHKeyBundle> {
 
 fn save_ratchet_state(username: &str, state: &DoubleRatchet) -> Result<()> {
     let conn = database::get_connection()?;
+    let current_user = auth::get_current_username()?;
     let now = chrono::Utc::now().to_rfc3339();
 
-    // Serialize ratchet state using export method
     let state_json = state.export();
     let state_str = serde_json::to_string(&state_json)?;
+
+    // Use composite key: current_user:conversation_partner
+    let key = format!("{}:{}", current_user, username);
 
     conn.execute(
         "INSERT OR REPLACE INTO ratchet_states (username, state_data, last_updated)
          VALUES (?1, ?2, ?3)",
-        rusqlite::params![username, state_str, now],
+        rusqlite::params![key, state_str, now],
     )?;
 
     Ok(())
@@ -351,10 +425,13 @@ fn save_ratchet_state(username: &str, state: &DoubleRatchet) -> Result<()> {
 
 fn load_ratchet_state(username: &str) -> Result<DoubleRatchet> {
     let conn = database::get_connection()?;
+    let current_user = auth::get_current_username()?;
+
+    let key = format!("{}:{}", current_user, username);
 
     let state_str: String = conn.query_row(
         "SELECT state_data FROM ratchet_states WHERE username = ?1",
-        rusqlite::params![username],
+        rusqlite::params![key],
         |row| row.get(0),
     )?;
 
