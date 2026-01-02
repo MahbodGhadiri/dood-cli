@@ -70,7 +70,7 @@ DooD CLI is a **work in progress** and currently has some limitations:
 
 - **Rust**: Install from [rustup.rs](https://rustup.rs/)
 - **Git**: For cloning repositories
-- **DooD API Server**: You'll need access to a DooD server (see below)
+- **DooD API Server**: You'll need access to a DooD server (see Step 5)
 
 ### Step 1: Clone the Encryption Library
 
@@ -106,14 +106,19 @@ cargo build --release
 
 The compiled binary will be available at `target/release/dood-cli` (or `dood-cli.exe` on Windows).
 
-### Step 5: Set Up a Server
+### Step 5: Set Up a DooD API Server
 
-**Note**: The DooD API server is not yet publicly available. For now, use this placeholder:
+To use DooD CLI, you need a DooD API server to connect to. You can:
 
-```
-# Coming soon: Instructions for self-hosting DooD API
-# Repository: [Will be available at github.com/YOUR_USERNAME/DooD-API]
-```
+1. **Self-host your own server**: Clone and deploy the DooD API server
+
+   ```bash
+   git clone git@github.com:MahbodGhadiri/dood-api.git
+   ```
+
+   Follow the instructions in the [DooD API repository](https://github.com/MahbodGhadiri/dood-api) to set up and run your server.
+
+2. **Connect to an existing server**: If someone else is hosting a DooD server, get the server URL from them.
 
 ---
 
@@ -241,7 +246,7 @@ Future features I'm working on:
 ## 🔗 Related Projects
 
 - **DooD Encryption Library**: [github.com/MahbodGhadiri/DooD-encryption-lib](https://github.com/MahbodGhadiri/DooD-encryption-lib)
-- **DooD API Server**: [Coming soon - Self-hostable server implementation]
+- **DooD API Server**: [github.com/MahbodGhadiri/dood-api](https://github.com/MahbodGhadiri/dood-api)
 
 ---
 
@@ -267,3 +272,5 @@ While DooD implements industry-standard cryptographic protocols, this is an earl
 If you discover a security vulnerability, please report it responsibly by contacting [m.ghadirisani2013@gmail.com].
 
 ---
+
+**Built with 🔐 by the DooD Project**
